@@ -42,7 +42,8 @@ export const MenuItem: FC<MenuItemProps> = ({ text, successText, disabled = fals
         : undefined
 
     return (
-        <div
+        <button
+            type="button"
             className={`
             menu-item
             __menu-item hoverable
@@ -70,6 +71,6 @@ export const MenuItem: FC<MenuItemProps> = ({ text, successText, disabled = fals
                         </span>
                     </>
                     )}
-        </div>
+        </button>
     )
 }
