@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.34.7
+// @version            2.34.8
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -1504,7 +1504,6 @@ html {
     });
   }
   const conversationsApi = (offset, limit) => _default(apiUrl, "/conversations", { offset, limit });
-  const conversationInitApi = _default(apiUrl, "/conversation/init");
   const fileDownloadApi = (id) => _default(apiUrl, "/files/download/:id", { id, post_id: "", inline: false });
   const projectsApi = (cursor) => _default(apiUrl, "/gizmos/snorlax/sidebar", { conversations_per_gizmo: 0, cursor });
   const projectConversationsApi = (gizmo, cursor, limit) => _default(apiUrl, "/gizmos/:gizmo/conversations", { gizmo, cursor, limit });
@@ -1584,25 +1583,14 @@ html {
       };
     }
     const conversationOwnerUserId = ownerUserId || getConversationOwnerUserIdFromUrl(chatId);
-    const conversationProjectId = projectId || (conversationOwnerUserId ? getProjectIdFromUrl() : null);
+    const rawProjectId = projectId || (conversationOwnerUserId ? getProjectIdFromUrl() : null);
+    const conversationProjectId = rawProjectId ? normalizeProjectIdForApi(rawProjectId) : null;
     const url = conversationApi(chatId);
     const sharedProjectHeaders = conversationOwnerUserId && conversationProjectId ? {
       "chatgpt-project-id": conversationProjectId,
       "chatgpt-conv-owner-id": conversationOwnerUserId
     } : void 0;
-    let conversation;
-    try {
-      conversation = await fetchApi(url, { headers: sharedProjectHeaders });
-    } catch (error) {
-      if (!conversationOwnerUserId || error instanceof RateLimitError) throw error;
-      if (!conversationProjectId) throw error;
-      conversation = await initializeSharedProjectConversation(
-        chatId,
-        conversationProjectId,
-        conversationOwnerUserId,
-        sharedProjectHeaders
-      );
-    }
+    const conversation = await fetchApi(url, { headers: sharedProjectHeaders });
     if (shouldReplaceAssets) {
       await replaceImageAssets(conversation);
     }
@@ -1611,35 +1599,11 @@ html {
       ...conversation
     };
   }
-  async function initializeSharedProjectConversation(chatId, projectId, ownerUserId, sharedProjectHeaders) {
-    const initialized = await fetchApi(conversationInitApi, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...sharedProjectHeaders
-      },
-      body: JSON.stringify({
-        gizmo_id: projectId,
-        requested_default_model: null,
-        conversation_id: chatId,
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        timezone_offset_min: new Date().getTimezoneOffset(),
-        conversation_owner_id: ownerUserId
-      })
-    });
-    const candidates = [initialized, initialized == null ? void 0 : initialized.conversation, initialized == null ? void 0 : initialized.thread, initialized == null ? void 0 : initialized.data];
-    const conversation = candidates.find((candidate) => (candidate == null ? void 0 : candidate.mapping) && typeof candidate.mapping === "object");
-    if (conversation) return conversation;
-    const initializedConversationId = (initialized == null ? void 0 : initialized.conversation_id) || ((initialized == null ? void 0 : initialized.conversation) == null ? void 0 : initialized.conversation.id) || ((initialized == null ? void 0 : initialized.thread) == null ? void 0 : initialized.thread.conversation_id);
-    if (typeof initializedConversationId === "string" && initializedConversationId !== chatId) {
-      return fetchApi(conversationApi(initializedConversationId), { headers: sharedProjectHeaders });
-    }
-    const shape = Object.fromEntries(Object.entries(initialized || {}).map(([key, value]) => [
-      key,
-      Array.isArray(value) ? "array" : typeof value
-    ]));
-    console.info("[Exporter] Shared conversation init response shape:", shape);
-    throw new Error(`Shared conversation initialization returned no exportable conversation. Fields: ${Object.keys(shape).join(", ")}`);
+  function normalizeProjectIdForApi(projectId) {
+    const parts = projectId.split("-");
+    if (parts[0] !== "g" || parts.length < 2) return projectId;
+    if (parts[1] === "p" && parts[2]) return `g-p-${parts[2]}`;
+    return `g-${parts[1]}`;
   }
   async function fetchProjects() {
     let cursor = null;
@@ -1765,6 +1729,16 @@ html {
       this.retryAfterMs = Number.isFinite(secs) && secs > 0 ? secs * 1e3 : 3e4;
     }
   }
+  class ApiResponseError extends Error {
+    constructor(status, statusText, details, canRetry) {
+      super(`${status} ${statusText}${details ? `: ${details}` : ""}`);
+      __publicField(this, "status");
+      __publicField(this, "canRetry");
+      this.name = "ApiResponseError";
+      this.status = status;
+      this.canRetry = canRetry;
+    }
+  }
   const RATE_LIMIT_HEADERS = [
     "retry-after",
     "x-ratelimit-limit-requests",
@@ -1806,7 +1780,14 @@ html {
         details = (await response.text()).trim().slice(0, 300);
       } catch {
       }
-      throw new Error(`${response.status} ${response.statusText}${details ? `: ${details}` : ""}`);
+      let canRetry = null;
+      try {
+        const parsed = JSON.parse(details);
+        const parsedCanRetry = parsed == null || parsed.detail == null ? void 0 : parsed.detail.can_retry;
+        if (typeof parsedCanRetry === "boolean") canRetry = parsedCanRetry;
+      } catch {
+      }
+      throw new ApiResponseError(response.status, response.statusText, details, canRetry);
     }
     return response.json();
   }
@@ -3168,6 +3149,11 @@ html {
         const hasTabbableElementsInside = first && last;
         if (!hasTabbableElementsInside) {
           if (focusedElement === container) event.preventDefault();
+        } else if (error2 instanceof ApiResponseError && error2.canRetry === false) {
+          console.error(`[Exporter] "${name}" skipped because the API marked the error as non-retryable:`, error2);
+          this.completed++;
+          this.progress(name, "processing");
+          waitMs = 0;
         } else {
           if (!event.shiftKey && focusedElement === last) {
             event.preventDefault();
@@ -22754,6 +22740,8 @@ ${content2}`;
           requestObject.retries++;
           if (requestObject.retries > MAX_RETRIES) {
             console.warn(`[Exporter] "${name}" skipped after ${MAX_RETRIES} retries`);
+            this.completed++;
+            this.progress(name, "processing");
             waitMs = 0;
           } else {
             this.backoff = Math.min(this.backoff * this.backoffMultiplier, this.maxBackoff);

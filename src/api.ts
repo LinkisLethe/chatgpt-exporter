@@ -441,7 +441,6 @@ function conversationApi(id: string, ownerUserId?: string | null) {
     })
 }
 const conversationsApi = (offset: number, limit: number) => urlcat(apiUrl, '/conversations', { offset, limit })
-const conversationInitApi = urlcat(apiUrl, '/conversation/init')
 const fileDownloadApi = (id: string) => urlcat(apiUrl, '/files/download/:id', { id, post_id: '', inline: false })
 const projectsApi = (cursor: number | null) => urlcat(apiUrl, '/gizmos/snorlax/sidebar', { conversations_per_gizmo: 0, cursor })
 const projectConversationsApi = (gizmo: string, cursor: string | number, limit: number) => urlcat(apiUrl, '/gizmos/:gizmo/conversations', { gizmo, cursor, limit })
@@ -552,7 +551,8 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
     }
 
     const conversationOwnerUserId = ownerUserId || getConversationOwnerUserIdFromUrl(chatId)
-    const conversationProjectId = projectId || (conversationOwnerUserId ? getProjectIdFromUrl() : null)
+    const rawProjectId = projectId || (conversationOwnerUserId ? getProjectIdFromUrl() : null)
+    const conversationProjectId = rawProjectId ? normalizeProjectIdForApi(rawProjectId) : null
     const url = conversationApi(chatId)
     const sharedProjectHeaders = conversationOwnerUserId && conversationProjectId
         ? {
@@ -560,21 +560,7 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
                 'chatgpt-conv-owner-id': conversationOwnerUserId,
             }
         : undefined
-    let conversation: ApiConversation
-    try {
-        conversation = await fetchApi<ApiConversation>(url, { headers: sharedProjectHeaders })
-    }
-    catch (error) {
-        if (!conversationOwnerUserId || error instanceof RateLimitError) throw error
-
-        if (!conversationProjectId) throw error
-        conversation = await initializeSharedProjectConversation(
-            chatId,
-            conversationProjectId,
-            conversationOwnerUserId,
-            sharedProjectHeaders,
-        )
-    }
+    const conversation = await fetchApi<ApiConversation>(url, { headers: sharedProjectHeaders })
 
     if (shouldReplaceAssets) {
         await replaceImageAssets(conversation)
@@ -586,46 +572,11 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
     }
 }
 
-async function initializeSharedProjectConversation(
-    chatId: string,
-    projectId: string,
-    ownerUserId: string,
-    sharedProjectHeaders: Record<string, string> | undefined,
-): Promise<ApiConversation> {
-    const initialized = await fetchApi<any>(conversationInitApi, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            ...sharedProjectHeaders,
-        },
-        body: JSON.stringify({
-            gizmo_id: projectId,
-            requested_default_model: null,
-            conversation_id: chatId,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            timezone_offset_min: new Date().getTimezoneOffset(),
-            conversation_owner_id: ownerUserId,
-        }),
-    })
-
-    const candidates = [initialized, initialized?.conversation, initialized?.thread, initialized?.data]
-    const conversation = candidates.find(candidate => candidate?.mapping && typeof candidate.mapping === 'object')
-    if (conversation) return conversation as ApiConversation
-
-    const initializedConversationId = initialized?.conversation_id
-        || initialized?.conversation?.id
-        || initialized?.thread?.conversation_id
-    if (typeof initializedConversationId === 'string' && initializedConversationId !== chatId) {
-        return fetchApi<ApiConversation>(conversationApi(initializedConversationId), { headers: sharedProjectHeaders })
-    }
-
-    const shape = Object.fromEntries(Object.entries(initialized || {}).map(([key, value]) => [
-        key,
-        Array.isArray(value) ? 'array' : typeof value,
-    ]))
-    // eslint-disable-next-line no-console
-    console.info('[Exporter] Shared conversation init response shape:', shape)
-    throw new Error(`Shared conversation initialization returned no exportable conversation. Fields: ${Object.keys(shape).join(', ')}`)
+function normalizeProjectIdForApi(projectId: string) {
+    const parts = projectId.split('-')
+    if (parts[0] !== 'g' || parts.length < 2) return projectId
+    if (parts[1] === 'p' && parts[2]) return `g-p-${parts[2]}`
+    return `g-${parts[1]}`
 }
 
 export async function fetchProjects(): Promise<ApiProjectInfo[]> {
@@ -812,6 +763,18 @@ export class RateLimitError extends Error {
     }
 }
 
+export class ApiResponseError extends Error {
+    readonly status: number
+    readonly canRetry: boolean | null
+
+    constructor(status: number, statusText: string, details: string, canRetry: boolean | null) {
+        super(`${status} ${statusText}${details ? `: ${details}` : ''}`)
+        this.name = 'ApiResponseError'
+        this.status = status
+        this.canRetry = canRetry
+    }
+}
+
 /** Header names ChatGPT might use for rate-limit signalling */
 const RATE_LIMIT_HEADERS = [
     'retry-after',
@@ -862,7 +825,15 @@ async function fetchApi<T>(url: string, options?: RequestInit, includeAccountId 
         catch {
             // Keep the HTTP status when the response body cannot be read.
         }
-        throw new Error(`${response.status} ${response.statusText}${details ? `: ${details}` : ''}`)
+        let canRetry: boolean | null = null
+        try {
+            const parsed = JSON.parse(details)
+            if (typeof parsed?.detail?.can_retry === 'boolean') canRetry = parsed.detail.can_retry
+        }
+        catch {
+            // A non-JSON error body has no structured retry hint.
+        }
+        throw new ApiResponseError(response.status, response.statusText, details, canRetry)
     }
     return response.json()
 }

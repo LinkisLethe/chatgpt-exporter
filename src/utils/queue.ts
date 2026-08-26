@@ -1,5 +1,5 @@
 import EventEmitter from 'mitt'
-import { RateLimitError } from '../api'
+import { ApiResponseError, RateLimitError } from '../api'
 import { sleep } from './utils'
 
 type RequestFn<T> = () => Promise<T>
@@ -187,11 +187,19 @@ export class RequestQueue<T> {
                 this.queue.unshift(requestObject)
                 waitMs = 0 // the sleep is handled at the top of the next process() call
             }
+            else if (error instanceof ApiResponseError && error.canRetry === false) {
+                console.error(`[Exporter] "${name}" skipped because the API marked the error as non-retryable:`, error)
+                this.completed++
+                this.progress(name, 'processing')
+                waitMs = 0
+            }
             else {
                 console.error(`[Exporter] "${name}" failed:`, error)
                 requestObject.retries++
                 if (requestObject.retries > MAX_RETRIES) {
                     console.warn(`[Exporter] "${name}" skipped after ${MAX_RETRIES} retries`)
+                    this.completed++
+                    this.progress(name, 'processing')
                     waitMs = 0 // skip — don't re-queue
                 }
                 else {
