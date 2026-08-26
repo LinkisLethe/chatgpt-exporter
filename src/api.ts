@@ -441,6 +441,7 @@ function conversationApi(id: string, ownerUserId?: string | null) {
     })
 }
 const conversationsApi = (offset: number, limit: number) => urlcat(apiUrl, '/conversations', { offset, limit })
+const conversationInitApi = urlcat(apiUrl, '/conversation/init')
 const fileDownloadApi = (id: string) => urlcat(apiUrl, '/files/download/:id', { id, post_id: '', inline: false })
 const projectsApi = (cursor: number | null) => urlcat(apiUrl, '/gizmos/snorlax/sidebar', { conversations_per_gizmo: 0, cursor })
 const projectConversationsApi = (gizmo: string, cursor: string | number, limit: number) => urlcat(apiUrl, '/gizmos/:gizmo/conversations', { gizmo, cursor, limit })
@@ -566,10 +567,13 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
     catch (error) {
         if (!conversationOwnerUserId || error instanceof RateLimitError) throw error
 
-        // Shared-project conversations belong to another user. Some ChatGPT
-        // deployments reject the viewer's Chatgpt-Account-Id header even
-        // though the same bearer token is allowed to read the shared chat.
-        conversation = await fetchApi<ApiConversation>(url, { headers: sharedProjectHeaders }, false)
+        if (!conversationProjectId) throw error
+        conversation = await initializeSharedProjectConversation(
+            chatId,
+            conversationProjectId,
+            conversationOwnerUserId,
+            sharedProjectHeaders,
+        )
     }
 
     if (shouldReplaceAssets) {
@@ -580,6 +584,48 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
         id: chatId,
         ...conversation,
     }
+}
+
+async function initializeSharedProjectConversation(
+    chatId: string,
+    projectId: string,
+    ownerUserId: string,
+    sharedProjectHeaders: Record<string, string> | undefined,
+): Promise<ApiConversation> {
+    const initialized = await fetchApi<any>(conversationInitApi, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            ...sharedProjectHeaders,
+        },
+        body: JSON.stringify({
+            gizmo_id: projectId,
+            requested_default_model: null,
+            conversation_id: chatId,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            timezone_offset_min: new Date().getTimezoneOffset(),
+            conversation_owner_id: ownerUserId,
+        }),
+    })
+
+    const candidates = [initialized, initialized?.conversation, initialized?.thread, initialized?.data]
+    const conversation = candidates.find(candidate => candidate?.mapping && typeof candidate.mapping === 'object')
+    if (conversation) return conversation as ApiConversation
+
+    const initializedConversationId = initialized?.conversation_id
+        || initialized?.conversation?.id
+        || initialized?.thread?.conversation_id
+    if (typeof initializedConversationId === 'string' && initializedConversationId !== chatId) {
+        return fetchApi<ApiConversation>(conversationApi(initializedConversationId), { headers: sharedProjectHeaders })
+    }
+
+    const shape = Object.fromEntries(Object.entries(initialized || {}).map(([key, value]) => [
+        key,
+        Array.isArray(value) ? 'array' : typeof value,
+    ]))
+    // eslint-disable-next-line no-console
+    console.info('[Exporter] Shared conversation init response shape:', shape)
+    throw new Error(`Shared conversation initialization returned no exportable conversation. Fields: ${Object.keys(shape).join(', ')}`)
 }
 
 export async function fetchProjects(): Promise<ApiProjectInfo[]> {

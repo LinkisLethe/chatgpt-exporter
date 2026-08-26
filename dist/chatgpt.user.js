@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.34.6
+// @version            2.34.7
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -1504,6 +1504,7 @@ html {
     });
   }
   const conversationsApi = (offset, limit) => _default(apiUrl, "/conversations", { offset, limit });
+  const conversationInitApi = _default(apiUrl, "/conversation/init");
   const fileDownloadApi = (id) => _default(apiUrl, "/files/download/:id", { id, post_id: "", inline: false });
   const projectsApi = (cursor) => _default(apiUrl, "/gizmos/snorlax/sidebar", { conversations_per_gizmo: 0, cursor });
   const projectConversationsApi = (gizmo, cursor, limit) => _default(apiUrl, "/gizmos/:gizmo/conversations", { gizmo, cursor, limit });
@@ -1594,7 +1595,13 @@ html {
       conversation = await fetchApi(url, { headers: sharedProjectHeaders });
     } catch (error) {
       if (!conversationOwnerUserId || error instanceof RateLimitError) throw error;
-      conversation = await fetchApi(url, { headers: sharedProjectHeaders }, false);
+      if (!conversationProjectId) throw error;
+      conversation = await initializeSharedProjectConversation(
+        chatId,
+        conversationProjectId,
+        conversationOwnerUserId,
+        sharedProjectHeaders
+      );
     }
     if (shouldReplaceAssets) {
       await replaceImageAssets(conversation);
@@ -1603,6 +1610,36 @@ html {
       id: chatId,
       ...conversation
     };
+  }
+  async function initializeSharedProjectConversation(chatId, projectId, ownerUserId, sharedProjectHeaders) {
+    const initialized = await fetchApi(conversationInitApi, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...sharedProjectHeaders
+      },
+      body: JSON.stringify({
+        gizmo_id: projectId,
+        requested_default_model: null,
+        conversation_id: chatId,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        timezone_offset_min: new Date().getTimezoneOffset(),
+        conversation_owner_id: ownerUserId
+      })
+    });
+    const candidates = [initialized, initialized == null ? void 0 : initialized.conversation, initialized == null ? void 0 : initialized.thread, initialized == null ? void 0 : initialized.data];
+    const conversation = candidates.find((candidate) => (candidate == null ? void 0 : candidate.mapping) && typeof candidate.mapping === "object");
+    if (conversation) return conversation;
+    const initializedConversationId = (initialized == null ? void 0 : initialized.conversation_id) || ((initialized == null ? void 0 : initialized.conversation) == null ? void 0 : initialized.conversation.id) || ((initialized == null ? void 0 : initialized.thread) == null ? void 0 : initialized.thread.conversation_id);
+    if (typeof initializedConversationId === "string" && initializedConversationId !== chatId) {
+      return fetchApi(conversationApi(initializedConversationId), { headers: sharedProjectHeaders });
+    }
+    const shape = Object.fromEntries(Object.entries(initialized || {}).map(([key, value]) => [
+      key,
+      Array.isArray(value) ? "array" : typeof value
+    ]));
+    console.info("[Exporter] Shared conversation init response shape:", shape);
+    throw new Error(`Shared conversation initialization returned no exportable conversation. Fields: ${Object.keys(shape).join(", ")}`);
   }
   async function fetchProjects() {
     let cursor = null;
