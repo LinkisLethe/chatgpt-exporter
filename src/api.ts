@@ -550,8 +550,20 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
         }
     }
 
-    const url = conversationApi(chatId, ownerUserId || getConversationOwnerUserIdFromUrl(chatId))
-    const conversation = await fetchApi<ApiConversation>(url)
+    const conversationOwnerUserId = ownerUserId || getConversationOwnerUserIdFromUrl(chatId)
+    const url = conversationApi(chatId, conversationOwnerUserId)
+    let conversation: ApiConversation
+    try {
+        conversation = await fetchApi<ApiConversation>(url)
+    }
+    catch (error) {
+        if (!conversationOwnerUserId || error instanceof RateLimitError) throw error
+
+        // Shared-project conversations belong to another user. Some ChatGPT
+        // deployments reject the viewer's Chatgpt-Account-Id header even
+        // though the same bearer token is allowed to read the shared chat.
+        conversation = await fetchApi<ApiConversation>(url, undefined, false)
+    }
 
     if (shouldReplaceAssets) {
         await replaceImageAssets(conversation)
@@ -770,7 +782,7 @@ function logRateLimitHeaders(response: Response) {
     }
 }
 
-async function fetchApi<T>(url: string, options?: RequestInit): Promise<T> {
+async function fetchApi<T>(url: string, options?: RequestInit, includeAccountId = true): Promise<T> {
     const accessToken = await getAccessToken()
     const accountId = await getTeamAccountId()
 
@@ -779,7 +791,7 @@ async function fetchApi<T>(url: string, options?: RequestInit): Promise<T> {
         headers: {
             'Authorization': `Bearer ${accessToken}`,
             'X-Authorization': `Bearer ${accessToken}`,
-            ...(accountId ? { 'Chatgpt-Account-Id': accountId } : {}),
+            ...(includeAccountId && accountId ? { 'Chatgpt-Account-Id': accountId } : {}),
             ...options?.headers,
         },
     })
@@ -790,7 +802,14 @@ async function fetchApi<T>(url: string, options?: RequestInit): Promise<T> {
         if (response.status === 429) {
             throw new RateLimitError(response.headers.get('Retry-After'))
         }
-        throw new Error(response.statusText)
+        let details = ''
+        try {
+            details = (await response.text()).trim().slice(0, 300)
+        }
+        catch {
+            // Keep the HTTP status when the response body cannot be read.
+        }
+        throw new Error(`${response.status} ${response.statusText}${details ? `: ${details}` : ''}`)
     }
     return response.json()
 }

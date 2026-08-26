@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.34.3
+// @version            2.34.4
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -1582,8 +1582,15 @@ html {
         ...shareConversation
       };
     }
-    const url = conversationApi(chatId, ownerUserId || getConversationOwnerUserIdFromUrl(chatId));
-    const conversation = await fetchApi(url);
+    const conversationOwnerUserId = ownerUserId || getConversationOwnerUserIdFromUrl(chatId);
+    const url = conversationApi(chatId, conversationOwnerUserId);
+    let conversation;
+    try {
+      conversation = await fetchApi(url);
+    } catch (error) {
+      if (!conversationOwnerUserId || error instanceof RateLimitError) throw error;
+      conversation = await fetchApi(url, void 0, false);
+    }
     if (shouldReplaceAssets) {
       await replaceImageAssets(conversation);
     }
@@ -1735,7 +1742,7 @@ html {
       console.info("[Exporter] Rate-limit headers:", found);
     }
   }
-  async function fetchApi(url, options) {
+  async function fetchApi(url, options, includeAccountId = true) {
     const accessToken = await getAccessToken();
     const accountId = await getTeamAccountId();
     const response = await fetch(url, {
@@ -1743,7 +1750,7 @@ html {
       headers: {
         "Authorization": `Bearer ${accessToken}`,
         "X-Authorization": `Bearer ${accessToken}`,
-        ...accountId ? { "Chatgpt-Account-Id": accountId } : {},
+        ...includeAccountId && accountId ? { "Chatgpt-Account-Id": accountId } : {},
         ...options == null ? void 0 : options.headers
       }
     });
@@ -1752,7 +1759,12 @@ html {
       if (response.status === 429) {
         throw new RateLimitError(response.headers.get("Retry-After"));
       }
-      throw new Error(response.statusText);
+      let details = "";
+      try {
+        details = (await response.text()).trim().slice(0, 300);
+      } catch {
+      }
+      throw new Error(`${response.status} ${response.statusText}${details ? `: ${details}` : ""}`);
     }
     return response.json();
   }
