@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.34.4
+// @version            2.34.5
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -1572,7 +1572,7 @@ html {
       })
     ]);
   }
-  async function fetchConversation(chatId, shouldReplaceAssets, ownerUserId) {
+  async function fetchConversation(chatId, shouldReplaceAssets, ownerUserId, projectId) {
     if (chatId.startsWith("__share__")) {
       const id = chatId.replace("__share__", "");
       const shareConversation = getConversationFromSharePage();
@@ -1583,13 +1583,18 @@ html {
       };
     }
     const conversationOwnerUserId = ownerUserId || getConversationOwnerUserIdFromUrl(chatId);
-    const url = conversationApi(chatId, conversationOwnerUserId);
+    const conversationProjectId = projectId || (conversationOwnerUserId ? getProjectIdFromUrl() : null);
+    const url = conversationApi(chatId);
+    const sharedProjectHeaders = conversationOwnerUserId && conversationProjectId ? {
+      "chatgpt-project-id": conversationProjectId,
+      "chatgpt-conv-owner-id": conversationOwnerUserId
+    } : void 0;
     let conversation;
     try {
-      conversation = await fetchApi(url);
+      conversation = await fetchApi(url, { headers: sharedProjectHeaders });
     } catch (error) {
       if (!conversationOwnerUserId || error instanceof RateLimitError) throw error;
-      conversation = await fetchApi(url, void 0, false);
+      conversation = await fetchApi(url, { headers: sharedProjectHeaders }, false);
     }
     if (shouldReplaceAssets) {
       await replaceImageAssets(conversation);
@@ -23337,8 +23342,8 @@ ${content2}`;
     }, [t2]);
     const startApiBatch = T$4((chunk) => {
       requestQueue.clear();
-      chunk.forEach(({ id, title: title2, owner_user_id: ownerUserId }) => {
-        requestQueue.add({ name: title2, request: () => fetchConversation(id, exportType !== "JSON", ownerUserId) });
+      chunk.forEach(({ id, title: title2, owner_user_id: ownerUserId, gizmo_id: projectId }) => {
+        requestQueue.add({ name: title2, request: () => fetchConversation(id, exportType !== "JSON", ownerUserId, projectId) });
       });
       requestQueue.start();
     }, [requestQueue, exportType]);

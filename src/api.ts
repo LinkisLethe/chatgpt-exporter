@@ -538,7 +538,7 @@ async function replaceImageAssets(conversation: ApiConversation): Promise<void> 
     ])
 }
 
-export async function fetchConversation(chatId: string, shouldReplaceAssets: boolean, ownerUserId?: string | null): Promise<ApiConversationWithId> {
+export async function fetchConversation(chatId: string, shouldReplaceAssets: boolean, ownerUserId?: string | null, projectId?: string | null): Promise<ApiConversationWithId> {
     if (chatId.startsWith('__share__')) {
         const id = chatId.replace('__share__', '')
         const shareConversation = getConversationFromSharePage() as ApiConversation
@@ -551,10 +551,17 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
     }
 
     const conversationOwnerUserId = ownerUserId || getConversationOwnerUserIdFromUrl(chatId)
-    const url = conversationApi(chatId, conversationOwnerUserId)
+    const conversationProjectId = projectId || (conversationOwnerUserId ? getProjectIdFromUrl() : null)
+    const url = conversationApi(chatId)
+    const sharedProjectHeaders = conversationOwnerUserId && conversationProjectId
+        ? {
+                'chatgpt-project-id': conversationProjectId,
+                'chatgpt-conv-owner-id': conversationOwnerUserId,
+            }
+        : undefined
     let conversation: ApiConversation
     try {
-        conversation = await fetchApi<ApiConversation>(url)
+        conversation = await fetchApi<ApiConversation>(url, { headers: sharedProjectHeaders })
     }
     catch (error) {
         if (!conversationOwnerUserId || error instanceof RateLimitError) throw error
@@ -562,7 +569,7 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
         // Shared-project conversations belong to another user. Some ChatGPT
         // deployments reject the viewer's Chatgpt-Account-Id header even
         // though the same bearer token is allowed to read the shared chat.
-        conversation = await fetchApi<ApiConversation>(url, undefined, false)
+        conversation = await fetchApi<ApiConversation>(url, { headers: sharedProjectHeaders }, false)
     }
 
     if (shouldReplaceAssets) {
