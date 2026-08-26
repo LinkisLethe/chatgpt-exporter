@@ -1,6 +1,6 @@
 import urlcat from 'urlcat'
 import { apiUrl, baseUrl } from './constants'
-import { getChatIdFromUrl, getConversationFromSharePage, getConversationOwnerUserIdFromUrl, isSharePage, isTemporaryChat } from './page'
+import { getChatIdFromUrl, getConversationFromSharePage, getConversationOwnerUserIdFromUrl, getProjectIdFromUrl, getProjectNameFromPage, getSharedProjectConversationLinks, isSharePage, isTemporaryChat } from './page'
 import { getTemporaryChatId } from './temporaryChat'
 import { blobToDataURL } from './utils/dom'
 import { memorize } from './utils/memorize'
@@ -317,6 +317,8 @@ export interface ApiConversationItem {
     is_temporary_chat?: boolean
     /** Non-null when the conversation belongs to a custom GPT or project */
     gizmo_id?: string | null
+    /** Required when another member owns a conversation in a shared project. */
+    owner_user_id?: string | null
     /** How the conversation was initiated, e.g. "apple" for Siri/iOS, null for web/app */
     conversation_origin?: string | null
     /** ISO 8601 timestamp if the conversation is pinned, null otherwise */
@@ -536,7 +538,7 @@ async function replaceImageAssets(conversation: ApiConversation): Promise<void> 
     ])
 }
 
-export async function fetchConversation(chatId: string, shouldReplaceAssets: boolean): Promise<ApiConversationWithId> {
+export async function fetchConversation(chatId: string, shouldReplaceAssets: boolean, ownerUserId?: string | null): Promise<ApiConversationWithId> {
     if (chatId.startsWith('__share__')) {
         const id = chatId.replace('__share__', '')
         const shareConversation = getConversationFromSharePage() as ApiConversation
@@ -548,7 +550,7 @@ export async function fetchConversation(chatId: string, shouldReplaceAssets: boo
         }
     }
 
-    const url = conversationApi(chatId, getConversationOwnerUserIdFromUrl(chatId))
+    const url = conversationApi(chatId, ownerUserId || getConversationOwnerUserIdFromUrl(chatId))
     const conversation = await fetchApi<ApiConversation>(url)
 
     if (shouldReplaceAssets) {
@@ -572,7 +574,17 @@ export async function fetchProjects(): Promise<ApiProjectInfo[]> {
         if (nextCursor === null) break
     }
 
-    return allItems.map(gizmo => (gizmo.gizmo.gizmo))
+    const projects = allItems.map(gizmo => (gizmo.gizmo.gizmo))
+    const currentProjectId = getProjectIdFromUrl()
+    if (currentProjectId && !projects.some(project => project.id === currentProjectId)) {
+        projects.push({
+            id: currentProjectId,
+            organization_id: '',
+            display: { name: getProjectNameFromPage(), description: 'Shared project' },
+        })
+    }
+
+    return projects
 }
 
 async function fetchConversations(offset = 0, limit = 20, project: string | null = null): Promise<ApiConversations> {
@@ -584,6 +596,29 @@ async function fetchConversations(offset = 0, limit = 20, project: string | null
 }
 
 async function fetchProjectConversations(project: string, cursor: string | number = 0, limit = 20): Promise<ApiConversations> {
+    const sharedProjectLinks = await getSharedProjectConversationLinks(project)
+    if (sharedProjectLinks.length > 0) {
+        const parsedCursor = typeof cursor === 'string' ? Number.parseInt(cursor, 10) : cursor
+        const offset = Number.isFinite(parsedCursor) ? parsedCursor : 0
+        const items = sharedProjectLinks.slice(offset, offset + limit).map<ApiConversationItem>(conversation => ({
+            id: conversation.id,
+            title: conversation.title,
+            create_time: 0,
+            gizmo_id: project,
+            owner_user_id: conversation.ownerUserId,
+        }))
+        const nextOffset = offset + items.length
+
+        return {
+            has_missing_conversations: false,
+            items,
+            limit,
+            offset,
+            total: sharedProjectLinks.length,
+            cursor: nextOffset < sharedProjectLinks.length ? String(nextOffset) : null,
+        }
+    }
+
     const url = projectConversationsApi(project, cursor, limit)
     const { items, cursor: nextCursor } = await fetchApi<{ items: ApiConversationItem[]; cursor: string | null }>(url)
     return {

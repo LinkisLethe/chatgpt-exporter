@@ -67,6 +67,106 @@ export function isSharedProjectConversationPage() {
     return /^\/g\/[a-z0-9-]+\/shared\/c\/[a-z0-9-]+/i.test(location.pathname)
 }
 
+export interface SharedProjectConversationLink {
+    id: string
+    ownerUserId: string | null
+    title: string
+}
+
+export function getProjectIdFromUrl() {
+    const match = location.pathname.match(/^\/g\/([a-z0-9-]+)\/(?:project|(?:shared\/)?c\/)/i)
+    return match?.[1] || null
+}
+
+export function getProjectNameFromPage() {
+    const heading = document.querySelector<HTMLElement>('main h1')
+    return heading?.innerText.trim() || getProjectIdFromUrl() || 'Shared project'
+}
+
+function collectSharedProjectConversationLinks(projectId: string): SharedProjectConversationLink[] {
+    const result = new Map<string, SharedProjectConversationLink>()
+    const selector = `a[href*="/g/${projectId}/shared/c/"], a[href*="/g/${projectId}/c/"]`
+
+    const anchors = Array.from(document.querySelectorAll(selector)) as HTMLAnchorElement[]
+    for (const anchor of anchors) {
+        const url = new URL(anchor.href, location.origin)
+        const match = url.pathname.match(/^\/g\/[a-z0-9-]+\/(?:shared\/)?c\/([a-z0-9-]+)/i)
+        if (!match) continue
+
+        const id = match[1]
+        const ownerUserId = url.pathname.includes('/shared/c/')
+            ? url.searchParams.get('owner_user_id')?.trim() || null
+            : null
+        const textLines = anchor.innerText.split(/\n+/).map(line => line.trim()).filter(Boolean)
+        const titleElement = anchor.querySelector('h1, h2, h3, [data-testid*="title"]') as HTMLElement | null
+        const title = anchor.getAttribute('aria-label')?.trim()
+            || titleElement?.innerText.trim()
+            || textLines[1]
+            || textLines[0]
+            || id
+
+        result.set(id, { id, ownerUserId, title })
+    }
+
+    return [...result.values()]
+}
+
+function findLoadMoreProjectConversationsButton() {
+    const tabPanel = document.querySelector('[role="tabpanel"]')
+    const root = tabPanel || document.querySelector('main') || document
+    const pattern = /load more (?:conversations|chats)|加载更多(?:对话|聊天)|載入更多(?:對話|聊天)|さらに.*(?:会話|チャット)|cargar más|charger plus|daha fazla/i
+
+    const buttons = Array.from(root.querySelectorAll('button')) as HTMLButtonElement[]
+    return buttons
+        .find(button => pattern.test(`${button.innerText} ${button.getAttribute('aria-label') || ''}`))
+}
+
+async function waitForProjectConversationListChange(projectId: string, previousCount: number, previousButton: HTMLButtonElement) {
+    for (let attempt = 0; attempt < 100; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+        const currentCount = collectSharedProjectConversationLinks(projectId).length
+        if (!previousButton.isConnected) return true
+        if (currentCount > previousCount && !previousButton.disabled) return true
+    }
+
+    return collectSharedProjectConversationLinks(projectId).length > previousCount
+}
+
+async function activateProjectChatsTab(projectId: string) {
+    if (collectSharedProjectConversationLinks(projectId).length > 0) return
+
+    const pattern = /^(?:chats?|聊天|對話|チャット)$/i
+    const tabs = Array.from(document.querySelectorAll('[role="tab"]')) as HTMLElement[]
+    const chatsTab = tabs
+        .find(tab => pattern.test(tab.innerText.trim()))
+    if (!chatsTab || chatsTab.getAttribute('aria-selected') === 'true') return
+
+    chatsTab.click()
+    for (let attempt = 0; attempt < 50; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+        if (collectSharedProjectConversationLinks(projectId).length > 0) return
+    }
+}
+
+/** Expands the project page and returns the owner id required for every shared chat. */
+export async function getSharedProjectConversationLinks(projectId: string) {
+    if (getProjectIdFromUrl() !== projectId || !location.pathname.includes('/project')) return []
+
+    await activateProjectChatsTab(projectId)
+
+    for (let page = 0; page < 100; page++) {
+        const button = findLoadMoreProjectConversationsButton()
+        if (!button || button.disabled) break
+
+        const previousCount = collectSharedProjectConversationLinks(projectId).length
+        button.click()
+        const changed = await waitForProjectConversationListChange(projectId, previousCount, button)
+        if (!changed) break
+    }
+
+    return collectSharedProjectConversationLinks(projectId)
+}
+
 /**
  * Temporary chats are hidden from the history list and their id never reaches
  * the URL, although the conversation API still serves them once the id is

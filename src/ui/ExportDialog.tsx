@@ -453,8 +453,8 @@ const DialogContent: FC<DialogContentProps> = ({ format }) => {
 
     const startApiBatch = useCallback((chunk: ApiConversationItem[]) => {
         requestQueue.clear()
-        chunk.forEach(({ id, title }) => {
-            requestQueue.add({ name: title, request: () => fetchConversation(id, exportType !== 'JSON') })
+        chunk.forEach(({ id, title, owner_user_id: ownerUserId }) => {
+            requestQueue.add({ name: title, request: () => fetchConversation(id, exportType !== 'JSON', ownerUserId) })
         })
         requestQueue.start()
     }, [requestQueue, exportType])

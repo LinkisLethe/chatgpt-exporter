@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.34.2
+// @version            2.34.3
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -1325,6 +1325,73 @@ html {
   function isSharedProjectConversationPage() {
     return /^\/g\/[a-z0-9-]+\/shared\/c\/[a-z0-9-]+/i.test(location.pathname);
   }
+  function getProjectIdFromUrl() {
+    const match = location.pathname.match(/^\/g\/([a-z0-9-]+)\/(?:project|(?:shared\/)?c\/)/i);
+    return (match == null ? void 0 : match[1]) || null;
+  }
+  function getProjectNameFromPage() {
+    const heading = document.querySelector("main h1");
+    return (heading == null ? void 0 : heading.innerText.trim()) || getProjectIdFromUrl() || "Shared project";
+  }
+  function collectSharedProjectConversationLinks(projectId) {
+    var _a, _b, _c;
+    const result = /* @__PURE__ */ new Map();
+    const selector = `a[href*="/g/${projectId}/shared/c/"], a[href*="/g/${projectId}/c/"]`;
+    const anchors = Array.from(document.querySelectorAll(selector));
+    for (const anchor of anchors) {
+      const url = new URL(anchor.href, location.origin);
+      const match = url.pathname.match(/^\/g\/[a-z0-9-]+\/(?:shared\/)?c\/([a-z0-9-]+)/i);
+      if (!match) continue;
+      const id = match[1];
+      const ownerUserId = url.pathname.includes("/shared/c/") ? ((_a = url.searchParams.get("owner_user_id")) == null ? void 0 : _a.trim()) || null : null;
+      const textLines = anchor.innerText.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+      const titleElement = anchor.querySelector('h1, h2, h3, [data-testid*="title"]');
+      const title = ((_b = anchor.getAttribute("aria-label")) == null ? void 0 : _b.trim()) || ((_c = titleElement == null ? void 0 : titleElement.innerText) == null ? void 0 : _c.trim()) || textLines[1] || textLines[0] || id;
+      result.set(id, { id, ownerUserId, title });
+    }
+    return [...result.values()];
+  }
+  function findLoadMoreProjectConversationsButton() {
+    const tabPanel = document.querySelector('[role="tabpanel"]');
+    const root = tabPanel || document.querySelector("main") || document;
+    const pattern = /load more (?:conversations|chats)|加载更多(?:对话|聊天)|載入更多(?:對話|聊天)|さらに.*(?:会話|チャット)|cargar más|charger plus|daha fazla/i;
+    const buttons = Array.from(root.querySelectorAll("button"));
+    return buttons.find((button) => pattern.test(`${button.innerText} ${button.getAttribute("aria-label") || ""}`));
+  }
+  async function waitForProjectConversationListChange(projectId, previousCount, previousButton) {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const currentCount = collectSharedProjectConversationLinks(projectId).length;
+      if (!previousButton.isConnected) return true;
+      if (currentCount > previousCount && !previousButton.disabled) return true;
+    }
+    return collectSharedProjectConversationLinks(projectId).length > previousCount;
+  }
+  async function activateProjectChatsTab(projectId) {
+    if (collectSharedProjectConversationLinks(projectId).length > 0) return;
+    const pattern = /^(?:chats?|聊天|對話|チャット)$/i;
+    const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+    const chatsTab = tabs.find((tab) => pattern.test(tab.innerText.trim()));
+    if (!chatsTab || chatsTab.getAttribute("aria-selected") === "true") return;
+    chatsTab.click();
+    for (let attempt = 0; attempt < 50; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (collectSharedProjectConversationLinks(projectId).length > 0) return;
+    }
+  }
+  async function getSharedProjectConversationLinks(projectId) {
+    if (getProjectIdFromUrl() !== projectId || !location.pathname.includes("/project")) return [];
+    await activateProjectChatsTab(projectId);
+    for (let page = 0; page < 100; page++) {
+      const button = findLoadMoreProjectConversationsButton();
+      if (!button || button.disabled) break;
+      const previousCount = collectSharedProjectConversationLinks(projectId).length;
+      button.click();
+      const changed = await waitForProjectConversationListChange(projectId, previousCount, button);
+      if (!changed) break;
+    }
+    return collectSharedProjectConversationLinks(projectId);
+  }
   function isTemporaryChat() {
     return new URLSearchParams(location.search).get("temporary-chat") === "true";
   }
@@ -1505,7 +1572,7 @@ html {
       })
     ]);
   }
-  async function fetchConversation(chatId, shouldReplaceAssets) {
+  async function fetchConversation(chatId, shouldReplaceAssets, ownerUserId) {
     if (chatId.startsWith("__share__")) {
       const id = chatId.replace("__share__", "");
       const shareConversation = getConversationFromSharePage();
@@ -1515,7 +1582,7 @@ html {
         ...shareConversation
       };
     }
-    const url = conversationApi(chatId, getConversationOwnerUserIdFromUrl(chatId));
+    const url = conversationApi(chatId, ownerUserId || getConversationOwnerUserIdFromUrl(chatId));
     const conversation = await fetchApi(url);
     if (shouldReplaceAssets) {
       await replaceImageAssets(conversation);
@@ -1535,7 +1602,16 @@ html {
       allItems.push(...items);
       if (nextCursor === null) break;
     }
-    return allItems.map((gizmo) => gizmo.gizmo.gizmo);
+    const projects = allItems.map((gizmo) => gizmo.gizmo.gizmo);
+    const currentProjectId = getProjectIdFromUrl();
+    if (currentProjectId && !projects.some((project) => project.id === currentProjectId)) {
+      projects.push({
+        id: currentProjectId,
+        organization_id: "",
+        display: { name: getProjectNameFromPage(), description: "Shared project" }
+      });
+    }
+    return projects;
   }
   async function fetchConversations(offset = 0, limit = 20, project = null) {
     if (project) {
@@ -1545,6 +1621,27 @@ html {
     return fetchApi(url);
   }
   async function fetchProjectConversations(project, cursor = 0, limit = 20) {
+    const sharedProjectLinks = await getSharedProjectConversationLinks(project);
+    if (sharedProjectLinks.length > 0) {
+      const parsedCursor = typeof cursor === "string" ? Number.parseInt(cursor, 10) : cursor;
+      const offset = Number.isFinite(parsedCursor) ? parsedCursor : 0;
+      const items = sharedProjectLinks.slice(offset, offset + limit).map((conversation) => ({
+        id: conversation.id,
+        title: conversation.title,
+        create_time: 0,
+        gizmo_id: project,
+        owner_user_id: conversation.ownerUserId
+      }));
+      const nextOffset = offset + items.length;
+      return {
+        has_missing_conversations: false,
+        items,
+        limit,
+        offset,
+        total: sharedProjectLinks.length,
+        cursor: nextOffset < sharedProjectLinks.length ? String(nextOffset) : null
+      };
+    }
     const url = projectConversationsApi(project, cursor, limit);
     const { items, cursor: nextCursor } = await fetchApi(url);
     return {
@@ -23228,8 +23325,8 @@ ${content2}`;
     }, [t2]);
     const startApiBatch = T$4((chunk) => {
       requestQueue.clear();
-      chunk.forEach(({ id, title: title2 }) => {
-        requestQueue.add({ name: title2, request: () => fetchConversation(id, exportType !== "JSON") });
+      chunk.forEach(({ id, title: title2, owner_user_id: ownerUserId }) => {
+        requestQueue.add({ name: title2, request: () => fetchConversation(id, exportType !== "JSON", ownerUserId) });
       });
       requestQueue.start();
     }, [requestQueue, exportType]);
