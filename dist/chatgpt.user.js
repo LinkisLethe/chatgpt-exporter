@@ -3,7 +3,7 @@
 // @name:zh-CN         ChatGPT Exporter
 // @name:zh-TW         ChatGPT Exporter
 // @namespace          pionxzh
-// @version            2.34.8
+// @version            2.34.9
 // @author             pionxzh
 // @description        Export ChatGPT conversations with one click — backup & share effortlessly!
 // @description:zh-CN  一键导出 ChatGPT 对话，轻松备份与分享
@@ -22724,6 +22724,7 @@ ${content2}`;
         this.progress(name, "processing");
         this.backoff = this.minBackoff;
         requestObject.retries = 0;
+        waitMs = Math.max(this.minBackoff, requestObject.cooldownMs ?? 0);
       } catch (error2) {
         if (runId !== this.runId) return;
         if (error2 instanceof RateLimitError) {
@@ -23368,7 +23369,11 @@ ${content2}`;
     const startApiBatch = T$4((chunk) => {
       requestQueue.clear();
       chunk.forEach(({ id, title: title2, owner_user_id: ownerUserId, gizmo_id: projectId }) => {
-        requestQueue.add({ name: title2, request: () => fetchConversation(id, exportType !== "JSON", ownerUserId, projectId) });
+        requestQueue.add({
+          name: title2,
+          request: () => fetchConversation(id, exportType !== "JSON", ownerUserId, projectId),
+          cooldownMs: ownerUserId ? 3e3 : void 0
+        });
       });
       requestQueue.start();
     }, [requestQueue, exportType]);

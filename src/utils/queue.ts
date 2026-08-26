@@ -8,6 +8,8 @@ type RequestFn<T> = () => Promise<T>
 interface RequestObject<T> {
     name: string
     request: RequestFn<T>
+    /** Minimum pause after a successful request before processing the next item. */
+    cooldownMs?: number
 }
 
 /** Internal shape with per-item retry counters */
@@ -167,6 +169,7 @@ export class RequestQueue<T> {
             this.progress(name, 'processing')
             this.backoff = this.minBackoff // reset on success
             requestObject.retries = 0
+            waitMs = Math.max(this.minBackoff, requestObject.cooldownMs ?? 0)
         }
         catch (error) {
             if (runId !== this.runId) return
