@@ -44,9 +44,27 @@ export function getChatIdFromUrl() {
     // /share/1e5sf-asdf-1234
     // /c/1e5sf-asdf-1234
     // /g/1e5sf-asdf-1234/c/1e5sf-asdf-1234
-    const match = location.pathname.match(/^\/(?:share|c|g\/[a-z0-9-]+\/c)\/([a-z0-9-]+)/i)
+    // /g/1e5sf-asdf-1234/shared/c/1e5sf-asdf-1234?owner_user_id=user-1234
+    const match = location.pathname.match(/^\/(?:share|c|g\/[a-z0-9-]+\/(?:shared\/)?c)\/([a-z0-9-]+)/i)
     if (match) return match[1]
     return null
+}
+
+/**
+ * A project member sees another member's conversation under a dedicated
+ * `shared/c` route. ChatGPT requires the owner's user id when that
+ * conversation is fetched through the conversation API.
+ */
+export function getConversationOwnerUserIdFromUrl(chatId: string) {
+    if (!isSharedProjectConversationPage()) return null
+    if (getChatIdFromUrl() !== chatId) return null
+
+    const ownerUserId = new URLSearchParams(location.search).get('owner_user_id')?.trim()
+    return ownerUserId || null
+}
+
+export function isSharedProjectConversationPage() {
+    return /^\/g\/[a-z0-9-]+\/shared\/c\/[a-z0-9-]+/i.test(location.pathname)
 }
 
 /**
